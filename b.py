@@ -559,51 +559,56 @@ class ARPSpoofer:
             pass
     
     def start(self):
-        self.clear_screen()
-        self.print_banner()
-        
-        # Check if running as root
-        if os.geteuid() != 0:
-            print(f"{Colors.WARNING}Warning: Not running as root. Packet capture may not work.{Colors.ENDC}")
-            response = input("Continue anyway? (y/n): ").strip().lower()
-            if response != 'y':
-                sys.exit(1)
-        
-        # Interactive configuration
-        self.interactive_config()
-        
-        # Final confirmation
-        print(f"\n{Colors.BOLD}Configuration:{Colors.ENDC}")
-        print(f"  Interface: {self.config['iface']}")
-        print(f"  Mode: {'Monitor all traffic' if self.config['sniff_all'] else f'Target {self.config["target_ip"]}'}")
-        
-        response = input(f"\n{Colors.CYAN}Start? (y/n): {Colors.ENDC}").strip().lower()
+    self.clear_screen()
+    self.print_banner()
+    
+    # Check if running as root
+    if os.geteuid() != 0:
+        print(f"{Colors.WARNING}Warning: Not running as root. Packet capture may not work.{Colors.ENDC}")
+        response = input("Continue anyway? (y/n): ").strip().lower()
         if response != 'y':
-            self.print_status("Aborted", "WARNING")
-            sys.exit(0)
-        
-        # Enable IP forwarding for MITM
-        if not self.config['sniff_all']:
-            self.enable_ip_forwarding()
-        
-        # Start ARP spoofing if configured
-        if not self.config['sniff_all']:
-            self.start_arpspoof()
-        
-        # Start packet capture
-        self.print_status("Starting packet capture...", "INFO")
-        self.stop_event.clear()
-        
-        capture_thread = threading.Thread(target=self.start_capture, daemon=True)
-        capture_thread.start()
-        
-        print(f"\n{Colors.WARNING}Press Ctrl+C to stop...{Colors.ENDC}\n")
-        
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            self.stop()
+            sys.exit(1)
+    
+    # Interactive configuration
+    self.interactive_config()
+    
+    # Final confirmation
+    print(f"\n{Colors.BOLD}Configuration:{Colors.ENDC}")
+    print(f"  Interface: {self.config['iface']}")
+    
+    # Fixed line - using single quotes for the nested f-string
+    if self.config['sniff_all']:
+        print(f"  Mode: Monitor all traffic")
+    else:
+        print(f"  Mode: Target {self.config['target_ip']}")
+    
+    response = input(f"\n{Colors.CYAN}Start? (y/n): {Colors.ENDC}").strip().lower()
+    if response != 'y':
+        self.print_status("Aborted", "WARNING")
+        sys.exit(0)
+    
+    # Enable IP forwarding for MITM
+    if not self.config['sniff_all']:
+        self.enable_ip_forwarding()
+    
+    # Start ARP spoofing if configured
+    if not self.config['sniff_all']:
+        self.start_arpspoof()
+    
+    # Start packet capture
+    self.print_status("Starting packet capture...", "INFO")
+    self.stop_event.clear()
+    
+    capture_thread = threading.Thread(target=self.start_capture, daemon=True)
+    capture_thread.start()
+    
+    print(f"\n{Colors.WARNING}Press Ctrl+C to stop...{Colors.ENDC}\n")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        self.stop()
     
     def stop(self):
         self.print_status("\nStopping...", "WARNING")
