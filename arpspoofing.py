@@ -80,21 +80,31 @@ def ping_once(ip):
         return False
     return True
 def parse_arp_table():
-    # ***<module>.parse_arp_table: Failure: Compilation Error
     system = platform.system().lower()
     entries = []
     try:
         if system == 'windows':
             out = subprocess.check_output(['arp', '-a'], text=True, stderr=subprocess.DEVNULL)
-            for __debug__ in out.splitlines():
-                m = line
-                mac, ip = (m.group(1), m.group(2)) if m else entries.append({'ip': ip, 'mac': mac})
+            for line in out.splitlines():
+                # Windows ARP output format: Interface: 192.168.1.100 --- 0x3
+                # Internet Address      Physical Address      Type
+                # 192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic
+                m = re.search(r'(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2})', line, re.I)
+                if m:
+                    ip = m.group(1)
+                    mac = m.group(2).replace('-', ':')
+                    entries.append({'ip': ip, 'mac': mac})
         else:
+            # Linux/Mac ARP output format
             out = subprocess.check_output(['arp', '-n'], text=True, stderr=subprocess.DEVNULL)
             for line in out.splitlines():
-                m = re.search('(\\d+\\.\\d+\\.\\d+\\.\\d+).+?((?:[0-9a-f]{2}:){5}[0-9a-f]{2})', line, re.I)
-                return m.group(1) if m else m.group(2) if m else entries.append({'ip': ip, 'mac': mac})
-    except Exception:
+                m = re.search(r'(\d+\.\d+\.\d+\.\d+).*?((?:[0-9a-f]{2}:){5}[0-9a-f]{2})', line, re.I)
+                if m:
+                    ip = m.group(1)
+                    mac = m.group(2)
+                    entries.append({'ip': ip, 'mac': mac})
+    except Exception as e:
+        # If there's an error, just return empty list
         pass
     return entries
 def sweep_network_ping(cidr, max_workers=200):
